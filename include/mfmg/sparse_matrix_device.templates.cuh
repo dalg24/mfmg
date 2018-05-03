@@ -336,12 +336,46 @@ void SparseMatrixDevice<ScalarType>::vmult(
                   src_val_dev, false, dst.val_dev);
 }
 
+cusparseStatus_t cusparseXcsr2csc(cusparseHandle_t handle, int m, int n,
+                                  int nnz, const float *csrVal,
+                                  const int *csrRowPtr, const int *csrColInd,
+                                  float *cscVal, int *cscRowInd, int *cscColPtr,
+                                  cusparseAction_t copyValues,
+                                  cusparseIndexBase_t idxBase)
+{
+  return cusparseScsr2csc(handle, m, n, nnz, csrVal, csrRowPtr, csrColInd,
+                          cscVal, cscRowInd, cscColPtr, copyValues, idxBase);
+}
+cusparseStatus_t cusparseXcsr2csc(cusparseHandle_t handle, int m, int n,
+                                  int nnz, const double *csrVal,
+                                  const int *csrRowPtr, const int *csrColInd,
+                                  double *cscVal, int *cscRowInd,
+                                  int *cscColPtr, cusparseAction_t copyValues,
+                                  cusparseIndexBase_t idxBase)
+{
+  return cusparseDcsr2csc(handle, m, n, nnz, csrVal, csrRowPtr, csrColInd,
+                          cscVal, cscRowInd, cscColPtr, copyValues, idxBase);
+}
+
 template <typename ScalarType>
 void SparseMatrixDevice<ScalarType>::mmult(
     SparseMatrixDevice<ScalarType> &C,
     SparseMatrixDevice<ScalarType> const &B) const
 {
-  // TODO Communicate the values
+  cusparseStatus_t cusparse_error_code;
+
+  // Convert B to CSC format because it makes it easier to fetch columns
+  ScalarType *BT_val_dev;
+  int *BT_row_index_dev;
+  int *BT_column_ptr_dev;
+  cuda_malloc(BT_val_dev, B.local_nnz());
+  cuda_malloc(BT_row_index_dev, B.local_nnz());
+  cuda_malloc(BT_column_ptr_dev, B.m() + 1);
+  cusparse_error_code = cusparseXcsr2csc(
+      cusparse_handle, B.m(), B.n(), B.local_nnz(), B.val_dev, B.row_ptr_dev,
+      B.column_index_dev, BT_val_dev, BT_row_index_dev, BT_column_ptr_dev,
+      CUSPARSE_ACTION_NUMERIC, CUSPARSE_INDEX_BASE_ZERO);
+  ASSERT_CUSPARSE(cusparse_error_code);
 
   // Compute the number of non-zero elements in C
   ASSERT(B.m() == n(), "The matrices cannot be multiplied together. You are "
@@ -351,7 +385,6 @@ void SparseMatrixDevice<ScalarType>::mmult(
                            std::to_string(B.n()));
   int C_local_nnz = 0;
   cusparseOperation_t cusparse_operation = CUSPARSE_OPERATION_NON_TRANSPOSE;
-  cusparseStatus_t cusparse_error_code;
   cusparse_error_code = cusparseXcsrgemmNnz(
       cusparse_handle, cusparse_operation, cusparse_operation, n_local_rows(),
       B.n(), n(), descr, local_nnz(), row_ptr_dev, column_index_dev, B.descr,
