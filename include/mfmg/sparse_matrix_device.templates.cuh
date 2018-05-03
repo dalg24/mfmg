@@ -336,6 +336,9 @@ void SparseMatrixDevice<ScalarType>::vmult(
                   src_val_dev, false, dst.val_dev);
 }
 
+// NOTE cuSPARSE does not provide a csr2csc format conversion routine with a
+// generic type so here we provide overloads for single and double precision
+// floating point numbers.
 cusparseStatus_t cusparseXcsr2csc(cusparseHandle_t handle, int m, int n,
                                   int nnz, const float *csrVal,
                                   const int *csrRowPtr, const int *csrColInd,
