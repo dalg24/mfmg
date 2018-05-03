@@ -339,3 +339,72 @@ BOOST_AUTO_TEST_CASE(mmult)
     cusparse_handle = nullptr;
   }
 }
+
+// takes a couple matrix on the host, A and B,
+// move them to the device, compute C = A * B
+// compare to result obtained on the host
+// NOTE: mfmg::SparseMatrixDevice require a cusparse handle
+// here I chose to pass a function that
+template <typename T>
+void testMatrixMatrixMultiplicationOnDevice(
+    dealii::TrilinosWrappers::SparseMatrix const &A_h,
+    dealii::TrilinosWrappers::SparseMatrix const &B_h,
+    T copy_sparse_matrix_to_device)
+{
+  // C = A * B on the host
+  dealii::TrilinosWrappers::SparseMatrix C_h;
+  A_h.mmult(C_h, B_h);
+
+  // copy A and B from the device to the host
+  auto A_d = copy_sparse_matrix_to_device(A_h);
+  auto B_d = copy_sparse_matrix_to_device(B_h);
+
+  // C = A * B on the device
+  mfmg::SparseMatrixDevice<double> C_d;
+  A_d.mmult(C_d, B_d);
+
+  // check that C_h and C_d are close enough
+  // I initially thought I'd copy C_d back to the host
+  // possibly subtract from C_h and look at the L1 norm
+  // of the matrix
+}
+
+BOOST_AUTO_TEST_CASE(mmult2)
+{
+  cusparseStatus_t cusparse_error_code;
+  cusparseHandle_t cusparse_handle = nullptr;
+  cusparse_error_code = cusparseCreate(&cusparse_handle);
+
+  // NB: need to pass cusparse_handle down to the matrix on the device
+  auto copy_sparse_matrix_to_device =
+      [&cusparse_handle](
+          dealii::TrilinosWrappers::SparseMatrix const &sparse_matrix_host) {
+        mfmg::SparseMatrixDevice<double> sparse_matrix_device =
+            mfmg::convert_matrix(sparse_matrix_host);
+
+        cusparseStatus_t cusparse_error_code;
+        cusparseMatDescr_t descr;
+        cusparse_error_code = cusparseCreateMatDescr(&descr);
+        mfmg::ASSERT_CUSPARSE(cusparse_error_code);
+        cusparse_error_code =
+            cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
+        mfmg::ASSERT_CUSPARSE(cusparse_error_code);
+        cusparse_error_code =
+            cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
+        mfmg::ASSERT_CUSPARSE(cusparse_error_code);
+
+        sparse_matrix_device.descr = descr;
+        sparse_matrix_device.cusparse_handle = cusparse_handle;
+
+        return sparse_matrix_device;
+      };
+
+  // TODO fill matrices
+  dealii::TrilinosWrappers::SparseMatrix A_h;
+  dealii::TrilinosWrappers::SparseMatrix B_h;
+
+  testMatrixMatrixMultiplicationOnDevice( A_h, A_h, copy_sparse_matrix_to_device);
+
+  cusparse_error_code = cusparseDestroy(cusparse_handle);
+  cusparse_handle = nullptr;
+}
