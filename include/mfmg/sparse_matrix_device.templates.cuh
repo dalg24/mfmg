@@ -364,6 +364,10 @@ void SparseMatrixDevice<ScalarType>::mmult(
 {
   cusparseStatus_t cusparse_error_code;
 
+  // NOTE for now assume index sets are not overlapping
+  auto row_map = _domain_indexset.make_trilinos_map(_comm);
+  auto column_map = B._range_indexset.make_trilinos_map(_comm);
+
   // Convert B to CSC format because it makes it easier to fetch columns
   ScalarType *BT_val_dev;
   int *BT_row_index_dev;
