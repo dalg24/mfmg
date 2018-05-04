@@ -18,6 +18,12 @@
 
 #include <deal.II/base/mpi.h>
 
+#include <Epetra_CrsMatrix.h>
+#include <Epetra_Export.h>
+#include <Epetra_Import.h>
+#include <Epetra_Map.h>
+#include <Epetra_Vector.h>
+
 namespace mfmg
 {
 namespace internal
@@ -360,6 +366,14 @@ cusparseStatus_t cusparseXcsr2csc(cusparseHandle_t handle, int m, int n,
                           cscVal, cscRowInd, cscColPtr, copyValues, idxBase);
 }
 
+template <typename T>
+inline void cuda_mem_copy_to_host(T const *ptr_device, ptrdiff_t n, T *ptr_host)
+{
+  cudaError_t cuda_error_code =
+      cudaMemcpy(ptr_host, ptr_device, n * sizeof(T), cudaMemcpyDeviceToHost);
+  ASSERT_CUDA(cuda_error_code);
+}
+
 template <typename ScalarType>
 void SparseMatrixDevice<ScalarType>::mmult(
     SparseMatrixDevice<ScalarType> &C,
@@ -367,9 +381,8 @@ void SparseMatrixDevice<ScalarType>::mmult(
 {
   cusparseStatus_t cusparse_error_code;
 
-  // NOTE for now assume index sets are not overlapping
-  auto row_map = _domain_indexset.make_trilinos_map(_comm);
-  auto column_map = B._range_indexset.make_trilinos_map(_comm);
+  // NOTE for now assume index sets are not overlapping when calling
+  // dealii::IndexSet::make_trilinos_map()
 
   // Convert B to CSC format because it makes it easier to fetch columns
   ScalarType *BT_val_dev;
@@ -383,6 +396,30 @@ void SparseMatrixDevice<ScalarType>::mmult(
       B.column_index_dev, BT_val_dev, BT_row_index_dev, BT_column_ptr_dev,
       CUSPARSE_ACTION_NUMERIC, CUSPARSE_INDEX_BASE_ZERO);
   ASSERT_CUSPARSE(cusparse_error_code);
+
+  // Copy "transpose of" B into a Epetra_CrsMatrix
+  Epetra_Map BT_row_map = B._domain_indexset.make_trilinos_map(B._comm);
+  Epetra_Map BT_column_map = B._range_indexset.make_trilinos_map(B._comm);
+  std::vector<int> BT_nnz_per_row_host(B.m() + 1);
+  cuda_mem_copy_to_host(BT_column_ptr_dev, BT_nnz_per_row_host);
+  std::adjacent_difference(std::begin(BT_nnz_per_row_host),
+                           std::end(BT_nnz_per_row_host),
+                           std::begin(BT_nnz_per_row_host));
+  Epetra_CrsMatrix BT(Copy, BT_row_map, BT_column_map,
+                      BT_nnz_per_row_host.data() + 1, true);
+  // TODO Epetra only works with double precision BUG BUG BUG!!!
+  ScalarType *BT_val_host;
+  int *BT_column_ptr_host;
+  int *BT_row_index_host;
+  double* bug = reinterpret_cast<double*>(BT_val_host);
+  BT.ExtractCrsDataPointers(BT_column_ptr_host, BT_row_index_host, bug);
+  cuda_mem_copy_to_host(BT_val_dev, B.local_nnz(), BT_val_host);
+  cuda_mem_copy_to_host(BT_column_ptr_dev, B.m() + 1, BT_column_ptr_host);
+  cuda_mem_copy_to_host(BT_row_index_dev, B.local_nnz(), BT_row_index_host);
+
+  Epetra_Map source_map = _domain_indexset.make_trilinos_map(_comm);
+  Epetra_Map target_map = B._range_indexset.make_trilinos_map(_comm);
+  Epetra_Import importer(source_map, target_map);
 
   // Compute the number of non-zero elements in C
   ASSERT(B.m() == n(), "The matrices cannot be multiplied together. You are "
