@@ -403,7 +403,8 @@ BOOST_AUTO_TEST_CASE(mmult2)
   dealii::TrilinosWrappers::SparseMatrix A_h;
   dealii::TrilinosWrappers::SparseMatrix B_h;
 
-  testMatrixMatrixMultiplicationOnDevice( A_h, A_h, copy_sparse_matrix_to_device);
+  testMatrixMatrixMultiplicationOnDevice(A_h, A_h,
+                                         copy_sparse_matrix_to_device);
 
   cusparse_error_code = cusparseDestroy(cusparse_handle);
   cusparse_handle = nullptr;
