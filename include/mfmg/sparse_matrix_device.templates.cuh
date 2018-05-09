@@ -374,66 +374,149 @@ inline void cuda_mem_copy_to_host(T const *ptr_device, ptrdiff_t n, T *ptr_host)
   ASSERT_CUDA(cuda_error_code);
 }
 
+template <typename T>
+inline void cuda_mem_copy_to_device(T const *ptr_host, ptrdiff_t n,
+                                    T *ptr_device)
+{
+  cudaError_t cuda_error_code =
+      cudaMemcpy(ptr_device, ptr_host, n * sizeof(T), cudaMemcpyHostToDevice);
+  ASSERT_CUDA(cuda_error_code);
+}
+
+// NOTE cuSPARSE does not provide a csrgemm matrix-matrix operation with a
+// generic type so here we provide overloads for single and double precision
+// floating point numbers.
+cusparseStatus_t
+cusparseXcsrgemm(cusparseHandle_t handle, cusparseOperation_t transA,
+                 cusparseOperation_t transB, int m, int n, int k,
+                 const cusparseMatDescr_t descrA, const int nnzA,
+                 const float *csrValA, const int *csrRowPtrA,
+                 const int *csrColIndA, const cusparseMatDescr_t descrB,
+                 const int nnzB, const float *csrValB, const int *csrRowPtrB,
+                 const int *csrColIndB, const cusparseMatDescr_t descrC,
+                 float *csrValC, const int *csrRowPtrC, int *csrColIndC)
+{
+  return cusparseScsrgemm(handle, transA, transB, m, n, k, descrA, nnzA,
+                          csrValA, csrRowPtrA, csrColIndA, descrB, nnzB,
+                          csrValB, csrRowPtrB, csrColIndB, descrC, csrValC,
+                          csrRowPtrC, csrColIndC);
+}
+
+cusparseStatus_t
+cusparseXcsrgemm(cusparseHandle_t handle, cusparseOperation_t transA,
+                 cusparseOperation_t transB, int m, int n, int k,
+                 const cusparseMatDescr_t descrA, const int nnzA,
+                 const double *csrValA, const int *csrRowPtrA,
+                 const int *csrColIndA, const cusparseMatDescr_t descrB,
+                 const int nnzB, const double *csrValB, const int *csrRowPtrB,
+                 const int *csrColIndB, const cusparseMatDescr_t descrC,
+                 double *csrValC, const int *csrRowPtrC, int *csrColIndC)
+{
+  return cusparseDcsrgemm(handle, transA, transB, m, n, k, descrA, nnzA,
+                          csrValA, csrRowPtrA, csrColIndA, descrB, nnzB,
+                          csrValB, csrRowPtrB, csrColIndB, descrC, csrValC,
+                          csrRowPtrC, csrColIndC);
+}
+
 template <typename ScalarType>
 void SparseMatrixDevice<ScalarType>::mmult(
     SparseMatrixDevice<ScalarType> &C,
     SparseMatrixDevice<ScalarType> const &B) const
 {
+  static_assert(std::is_same<ScalarType, double>::value,
+                "SparseMatrixDevice::mmult() requires double-precision "
+                "floating-point numbers because of Epetra_CrsMatrix");
+
+  ASSERT(B.m() == n(), "The matrices cannot be multiplied together. You are "
+                       "trying to mutiply a " +
+                           std::to_string(m()) + " by " + std::to_string(n()) +
+                           " matrix with a " + std::to_string(B.m()) + " by " +
+                           std::to_string(B.n()));
+
   cusparseStatus_t cusparse_error_code;
 
   // NOTE for now assume index sets are not overlapping when calling
   // dealii::IndexSet::make_trilinos_map()
 
   // Convert B to CSC format because it makes it easier to fetch columns
-  ScalarType *BT_val_dev;
-  int *BT_row_index_dev;
-  int *BT_column_ptr_dev;
-  cuda_malloc(BT_val_dev, B.local_nnz());
-  cuda_malloc(BT_row_index_dev, B.local_nnz());
-  cuda_malloc(BT_column_ptr_dev, B.m() + 1);
+  int const B_local_nnz = B.local_nnz();
+  int const B_local_m = B._range_indexset.n_elements();  // rows
+  int const B_local_n = B._domain_indexset.n_elements(); // columns
+  ScalarType *B_val_dev;
+  int *B_row_index_dev;
+  int *B_column_ptr_dev;
+  cuda_malloc(B_val_dev, B_local_nnz);
+  cuda_malloc(B_row_index_dev, B_local_nnz);
+  cuda_malloc(B_column_ptr_dev, B_local_n + 1);
   cusparse_error_code = cusparseXcsr2csc(
-      cusparse_handle, B.m(), B.n(), B.local_nnz(), B.val_dev, B.row_ptr_dev,
-      B.column_index_dev, BT_val_dev, BT_row_index_dev, BT_column_ptr_dev,
-      CUSPARSE_ACTION_NUMERIC, CUSPARSE_INDEX_BASE_ZERO);
+      cusparse_handle, B_local_m, B_local_n, B_local_nnz, B.val_dev,
+      B.row_ptr_dev, B.column_index_dev, B_val_dev, B_row_index_dev,
+      B_column_ptr_dev, CUSPARSE_ACTION_NUMERIC, CUSPARSE_INDEX_BASE_ZERO);
   ASSERT_CUSPARSE(cusparse_error_code);
 
   // Copy "transpose of" B into a Epetra_CrsMatrix
-  Epetra_Map BT_row_map = B._domain_indexset.make_trilinos_map(B._comm);
-  Epetra_Map BT_column_map = B._range_indexset.make_trilinos_map(B._comm);
-  std::vector<int> BT_nnz_per_row_host(B.m() + 1);
-  cuda_mem_copy_to_host(BT_column_ptr_dev, BT_nnz_per_row_host);
+  std::vector<int> BT_nnz_per_row_host(B_local_n + 1);
+  cuda_mem_copy_to_host(B_column_ptr_dev, BT_nnz_per_row_host);
   std::adjacent_difference(std::begin(BT_nnz_per_row_host),
                            std::end(BT_nnz_per_row_host),
                            std::begin(BT_nnz_per_row_host));
+  Epetra_Map BT_row_map = B._range_indexset.make_trilinos_map(_comm);
+  Epetra_Map BT_column_map = B._domain_indexset.make_trilinos_map(_comm);
   Epetra_CrsMatrix BT(Copy, BT_row_map, BT_column_map,
                       BT_nnz_per_row_host.data() + 1, true);
-  // TODO Epetra only works with double precision BUG BUG BUG!!!
-  ScalarType *BT_val_host;
-  int *BT_column_ptr_host;
-  int *BT_row_index_host;
-  double* bug = reinterpret_cast<double*>(BT_val_host);
-  BT.ExtractCrsDataPointers(BT_column_ptr_host, BT_row_index_host, bug);
-  cuda_mem_copy_to_host(BT_val_dev, B.local_nnz(), BT_val_host);
-  cuda_mem_copy_to_host(BT_column_ptr_dev, B.m() + 1, BT_column_ptr_host);
-  cuda_mem_copy_to_host(BT_row_index_dev, B.local_nnz(), BT_row_index_host);
+  ScalarType *B_val_host = nullptr;
+  int *B_row_index_host = nullptr;
+  int *B_column_ptr_host = nullptr;
+  BT.FillComplete(); // call before exctracting internal data pointers
+  int epetra_error_code;
+  epetra_error_code = BT.ExtractCrsDataPointers(B_column_ptr_host,
+                                                B_row_index_host, B_val_host);
+  ASSERT(epetra_error_code == 0,
+         "Non-zero error code returned by expert-only method "
+         "Epetra_CrsMatrix::ExtractCrsDataPointers()");
+  cuda_mem_copy_to_host(B_val_dev, B_local_nnz, B_val_host);
+  cuda_mem_copy_to_host(B_row_index_dev, B_local_nnz, B_row_index_host);
+  cuda_mem_copy_to_host(B_column_ptr_dev, B_local_n + 1, B_column_ptr_host);
+  cuda_free(B_val_dev);
+  cuda_free(B_row_index_dev);
+  cuda_free(B_column_ptr_dev);
 
-  Epetra_Map source_map = _domain_indexset.make_trilinos_map(_comm);
-  Epetra_Map target_map = B._range_indexset.make_trilinos_map(_comm);
-  Epetra_Import importer(source_map, target_map);
+  // Import rows of the transpose of B which are columns of B
+  Epetra_Map target_map = _range_indexset.make_trilinos_map(_comm);
+  Epetra_Import row_importer(target_map, BT_row_map);
+  Epetra_CrsMatrix BT_imported(BT, row_importer);
+
+  // Copy "imported" B back to the device
+  int const BT_imported_local_nnz = BT_imported.NumMyNonzeros();
+  int const BT_imported_local_m = BT_imported.NumMyRows();
+  int const BT_imported_local_n = BT_imported.NumMyCols();
+  ScalarType *BT_val_dev;
+  int *BT_row_index_dev;
+  int *BT_column_ptr_dev;
+  cuda_malloc(BT_val_dev, BT_imported_local_nnz);
+  cuda_malloc(BT_row_index_dev, BT_imported_local_nnz);
+  cuda_malloc(BT_column_ptr_dev, BT_imported_local_m + 1);
+  ScalarType *BT_val_host = nullptr;
+  int *BT_row_index_host = nullptr;
+  int *BT_column_ptr_host = nullptr;
+  BT_imported.ExtractCrsDataPointers(BT_column_ptr_host, BT_row_index_host,
+                                     BT_val_host);
+  cuda_mem_copy_to_device(BT_val_host, BT_imported_local_nnz, BT_val_dev);
+  cuda_mem_copy_to_device(BT_row_index_host, BT_imported_local_nnz,
+                          BT_row_index_dev);
+  cuda_mem_copy_to_device(BT_column_ptr_host, BT_imported_local_m + 1,
+                          BT_column_ptr_dev);
 
   // Compute the number of non-zero elements in C
-  ASSERT(B.m() == n(), "The matrices cannot be multiplied together. You are "
-                       "trying to mutiply a " +
-                           std::to_string(m()) + " by " + std::to_string(n()) +
-                           " matrix with a " + std::to_string(B.m()) + " by " +
-                           std::to_string(B.n()));
+  int const A_local_nnz = local_nnz();
+  int const A_local_m = _range_indexset.n_elements();  // rows
+  int const A_local_n = _domain_indexset.n_elements(); // columns
   int C_local_nnz = 0;
-  cusparseOperation_t cusparse_operation = CUSPARSE_OPERATION_NON_TRANSPOSE;
   cusparse_error_code = cusparseXcsrgemmNnz(
-      cusparse_handle, cusparse_operation, cusparse_operation, n_local_rows(),
-      B.n(), n(), descr, local_nnz(), row_ptr_dev, column_index_dev, B.descr,
-      B.local_nnz(), B.row_ptr_dev, B.column_index_dev, C.descr, C.row_ptr_dev,
-      &C_local_nnz);
+      cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+      CUSPARSE_OPERATION_TRANSPOSE, A_local_m, B.n(), n(), descr, A_local_nnz,
+      row_ptr_dev, column_index_dev, B.descr, B.local_nnz(), BT_column_ptr_dev,
+      BT_row_index_dev, C.descr, C.row_ptr_dev, &C_local_nnz);
   ASSERT_CUSPARSE(cusparse_error_code);
 
   // Reinitialize part of C
@@ -449,7 +532,13 @@ void SparseMatrixDevice<ScalarType>::mmult(
   C._range_indexset = _range_indexset;
   C._domain_indexset = B._domain_indexset;
 
-  internal::csrgemm(*this, B, C);
+  cusparse_error_code = cusparseXcsrgemm(
+      cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+      CUSPARSE_OPERATION_TRANSPOSE, A_local_m, B.n(), n(), descr, A_local_nnz,
+      val_dev, row_ptr_dev, column_index_dev, B.descr, B.local_nnz(),
+      BT_val_dev, BT_column_ptr_dev, BT_row_index_dev, C.descr, C.val_dev,
+      C.row_ptr_dev, C.column_index_dev);
+  ASSERT_CUSPARSE(cusparse_error_code);
 }
 }
 
