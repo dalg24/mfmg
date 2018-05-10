@@ -140,12 +140,27 @@ void gather_vector(VectorDevice<ScalarType> const &src, ScalarType *dst)
                                                      indices_dev, dst);
   cuda_free(dst_buffer);
 }
+
+cusparseMatDescr_t _default_matrix_description()
+{
+  cusparseStatus_t cusparse_error_code;
+  cusparseMatDescr_t descr;
+  cusparse_error_code = cusparseCreateMatDescr(&descr);
+  ASSERT_CUSPARSE(cusparse_error_code);
+  cusparse_error_code = cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
+  ASSERT_CUSPARSE(cusparse_error_code);
+  cusparse_error_code =
+      cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
+  ASSERT_CUSPARSE(cusparse_error_code);
+  return descr;
 }
+} // namespace internal
 
 template <typename ScalarType>
 SparseMatrixDevice<ScalarType>::SparseMatrixDevice()
     : _comm(MPI_COMM_SELF), val_dev(nullptr), column_index_dev(nullptr),
-      row_ptr_dev(nullptr), cusparse_handle(nullptr), descr(nullptr)
+      row_ptr_dev(nullptr), cusparse_handle(nullptr),
+      descr(internal::_default_matrix_description())
 {
 }
 
@@ -215,9 +230,9 @@ SparseMatrixDevice<ScalarType>::SparseMatrixDevice(
     dealii::IndexSet const &range_indexset,
     dealii::IndexSet const &domain_indexset)
     : _comm(comm), val_dev(val_dev_), column_index_dev(column_index_dev_),
-      row_ptr_dev(row_ptr_dev_), cusparse_handle(nullptr), descr(nullptr),
-      _local_nnz(local_nnz), _range_indexset(range_indexset),
-      _domain_indexset(domain_indexset)
+      row_ptr_dev(row_ptr_dev_), cusparse_handle(nullptr),
+      descr(internal::_default_matrix_description()), _local_nnz(local_nnz),
+      _range_indexset(range_indexset), _domain_indexset(domain_indexset)
 {
   _nnz = _local_nnz;
   dealii::Utilities::MPI::sum(_nnz, _comm);
@@ -234,15 +249,6 @@ SparseMatrixDevice<ScalarType>::SparseMatrixDevice(
                                      domain_indexset)
 {
   cusparse_handle = handle;
-
-  cusparseStatus_t cusparse_error_code;
-  cusparse_error_code = cusparseCreateMatDescr(&descr);
-  ASSERT_CUSPARSE(cusparse_error_code);
-  cusparse_error_code = cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
-  ASSERT_CUSPARSE(cusparse_error_code);
-  cusparse_error_code =
-      cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
-  ASSERT_CUSPARSE(cusparse_error_code);
 }
 
 template <typename ScalarType>
