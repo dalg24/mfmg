@@ -517,6 +517,8 @@ void SparseMatrixDevice<ScalarType>::mmult(
   int const A_local_nnz = local_nnz();
   int const A_local_m = _range_indexset.n_elements();  // rows
   int const A_local_n = _domain_indexset.n_elements(); // columns
+  cuda_free(C.row_ptr_dev);
+  cuda_malloc(C.row_ptr_dev, A_local_m + 1);
   int C_local_nnz = 0;
   cusparse_error_code = cusparseXcsrgemmNnz(
       cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -528,10 +530,8 @@ void SparseMatrixDevice<ScalarType>::mmult(
   // Reinitialize part of C
   cuda_free(C.val_dev);
   cuda_free(C.column_index_dev);
-  cuda_free(C.row_ptr_dev);
   cuda_malloc(C.val_dev, C_local_nnz);
   cuda_malloc(C.column_index_dev, C_local_nnz);
-  cuda_malloc(C.row_ptr_dev, n_local_rows() + 1);
   C._local_nnz = C_local_nnz;
   C._nnz = C._local_nnz;
   dealii::Utilities::MPI::sum(C._nnz, C._comm);
