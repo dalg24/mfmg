@@ -475,29 +475,64 @@ void SparseMatrixDevice<ScalarType>::mmult(
   std::cout << rank << " column map:\n";
   BT_column_map.Print(std::cout);
   std::cout << "\n";
+
   Epetra_CrsMatrix BT(Copy, BT_row_map, BT_column_map,
                       BT_nnz_per_row_host.data() + 1, true);
-  ScalarType *B_val_host = nullptr;
-  int *B_row_index_host = nullptr;
-  int *B_column_ptr_host = nullptr;
-  int const epetra_error_code = BT.ExtractCrsDataPointers(
-      B_column_ptr_host, B_row_index_host, B_val_host);
-  ASSERT(epetra_error_code == 0,
-         "Non-zero error code returned by expert-only method "
-         "Epetra_CrsMatrix::ExtractCrsDataPointers()");
+  // extract values and allocate memory
+  ScalarType *B_val_host = [&BT, B_local_nnz]() {
+    double *&values = BT.ExpertExtractValues();
+    // NOTE no idea why it is not nullptr here
+    ASSERT(values != nullptr, "values points to null");
+    // NOTE not sure if actually need delete here
+    delete[] values;
+    values = new double[B_local_nnz];
+    ASSERT(values != nullptr, "values points to null");
+    return values;
+  }();
+  // extract indices
+  int *B_row_index_host = [&BT, B_local_nnz]() {
+    Epetra_IntSerialDenseVector &indices = BT.ExpertExtractIndices();
+    ASSERT(indices.Length() == B_local_nnz, "indices not properly sized");
+    ASSERT(indices.Values() != nullptr, "indices points to null");
+    return indices.Values();
+  }();
+  // extract index offset
+  int *B_column_ptr_host = [&BT, B_local_n]() {
+    Epetra_IntSerialDenseVector &index_offset = BT.ExpertExtractIndexOffset();
+    ASSERT(index_offset.Length() == 0, "index offset not empty");
+    ASSERT(index_offset.Values() == nullptr,
+           "index offset does not point to null");
+    index_offset.Resize(B_local_n + 1);
+    ASSERT(index_offset.Length() == B_local_n + 1,
+           "index offset not properly sized");
+    ASSERT(index_offset.Values() != nullptr, "index offset points to null");
+    return index_offset.Values();
+  }();
+
+  BT.FillComplete();
+
+  // int const epetra_error_code = BT.ExtractCrsDataPointers(
+  //    B_column_ptr_host, B_row_index_host, B_val_host);
+  // ASSERT(epetra_error_code == 0,
+  //       "Non-zero error code returned by expert-only method "
+  //       "Epetra_CrsMatrix::ExtractCrsDataPointers()");
+
   ASSERT(B_column_ptr_host != nullptr, "column pointer is null");
   ASSERT(B_row_index_host != nullptr, "row indices is null");
-  ASSERT(B_val_host == nullptr, "values is not null");
-  B_val_host = new double[B_local_nnz];
-  BT.FillComplete(false); // call before exctracting internal data pointers
-  std::cout << B_local_nnz << "  " << BT.NumMyNonzeros() << std::endl;
+  ASSERT(B_val_host != nullptr, "values is null");
   cuda_mem_copy_to_host(B_val_dev, B_local_nnz, B_val_host);
   cuda_mem_copy_to_host(B_row_index_dev, B_local_nnz, B_row_index_host);
-  // FIXME debug only
-  cuda_mem_copy_to_host(B_column_ptr_dev, BT_nnz_per_row_host);
-  for (int i = 0; i < B_local_n + 1; ++i)
-    ASSERT(B_column_ptr_host[i] == BT_nnz_per_row_host[i],
-           "column indices do not match");
+  cuda_mem_copy_to_host(B_column_ptr_dev, B_local_n + 1, B_column_ptr_host);
+
+  // FIXME @aprokop WTF
+  std::cout << B_local_nnz << " VS " << BT.NumMyNonzeros() << std::endl;
+  std::cout << B_local_n << "x" << B_local_m << "  VS  " << BT.NumMyRows()
+            << "x" << BT.NumMyCols() << std::endl;
+
+  ASSERT(B_local_n == BT.NumMyRows(), "number of rows does not match");
+  ASSERT(B_local_m == BT.NumMyCols(), "number of cols does not match");
+  //ASSERT(B_local_nnz == BT.NumMyNonzeros(),
+  //       "number of local nonzeroes does not match");
   cuda_free(B_val_dev);
   cuda_free(B_row_index_dev);
   cuda_free(B_column_ptr_dev);
