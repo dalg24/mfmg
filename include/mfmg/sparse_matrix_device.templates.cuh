@@ -468,21 +468,36 @@ void SparseMatrixDevice<ScalarType>::mmult(
                            std::begin(BT_nnz_per_row_host));
   Epetra_Map BT_row_map = B._range_indexset.make_trilinos_map(_comm);
   Epetra_Map BT_column_map = B._domain_indexset.make_trilinos_map(_comm);
+  int const rank = dealii::Utilities::MPI::this_mpi_process(_comm);
+  std::cout << rank << " row map:\n";
+  BT_row_map.Print(std::cout);
+  std::cout << "\n";
+  std::cout << rank << " column map:\n";
+  BT_column_map.Print(std::cout);
+  std::cout << "\n";
   Epetra_CrsMatrix BT(Copy, BT_row_map, BT_column_map,
                       BT_nnz_per_row_host.data() + 1, true);
   ScalarType *B_val_host = nullptr;
   int *B_row_index_host = nullptr;
   int *B_column_ptr_host = nullptr;
-  BT.FillComplete(); // call before exctracting internal data pointers
-  int epetra_error_code;
-  epetra_error_code = BT.ExtractCrsDataPointers(B_column_ptr_host,
-                                                B_row_index_host, B_val_host);
+  int const epetra_error_code = BT.ExtractCrsDataPointers(
+      B_column_ptr_host, B_row_index_host, B_val_host);
   ASSERT(epetra_error_code == 0,
          "Non-zero error code returned by expert-only method "
          "Epetra_CrsMatrix::ExtractCrsDataPointers()");
+  ASSERT(B_column_ptr_host != nullptr, "column pointer is null");
+  ASSERT(B_row_index_host != nullptr, "row indices is null");
+  ASSERT(B_val_host == nullptr, "values is not null");
+  B_val_host = new double[B_local_nnz];
+  BT.FillComplete(false); // call before exctracting internal data pointers
+  std::cout << B_local_nnz << "  " << BT.NumMyNonzeros() << std::endl;
   cuda_mem_copy_to_host(B_val_dev, B_local_nnz, B_val_host);
   cuda_mem_copy_to_host(B_row_index_dev, B_local_nnz, B_row_index_host);
-  cuda_mem_copy_to_host(B_column_ptr_dev, B_local_n + 1, B_column_ptr_host);
+  // FIXME debug only
+  cuda_mem_copy_to_host(B_column_ptr_dev, BT_nnz_per_row_host);
+  for (int i = 0; i < B_local_n + 1; ++i)
+    ASSERT(B_column_ptr_host[i] == BT_nnz_per_row_host[i],
+           "column indices do not match");
   cuda_free(B_val_dev);
   cuda_free(B_row_index_dev);
   cuda_free(B_column_ptr_dev);

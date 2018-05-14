@@ -11,11 +11,13 @@
 
 #define BOOST_TEST_MODULE utils
 
+#include "laplace.hpp"
 #include "main.cc"
 
 #include <mfmg/sparse_matrix_device.cuh>
 #include <mfmg/utils.cuh>
 
+#include <deal.II/base/function.h>
 #include <deal.II/lac/la_parallel_vector.h>
 
 #include <set>
@@ -367,10 +369,70 @@ void testMatrixMatrixMultiplicationOnDevice(
   // I initially thought I'd copy C_d back to the host
   // possibly subtract from C_h and look at the L1 norm
   // of the matrix
+  double *C_val_host_ref = nullptr;
+  int *C_row_ptr_host_ref = nullptr;
+  int *C_column_index_host_ref = nullptr;
+  C_h.trilinos_matrix().ExtractCrsDataPointers(
+      C_row_ptr_host_ref, C_column_index_host_ref, C_val_host_ref);
+
+  std::vector<double> C_val_host(C_d.local_nnz());
+  std::vector<int> C_row_ptr_host(C_d.n_local_rows());
+  std::vector<int> C_column_index_host(C_d.local_nnz());
+  mfmg::cuda_mem_copy_to_host(C_d.val_dev, C_val_host);
+  mfmg::cuda_mem_copy_to_host(C_d.row_ptr_dev, C_row_ptr_host);
+  mfmg::cuda_mem_copy_to_host(C_d.column_index_dev, C_column_index_host);
+
+  auto range_index_set = C_d.locally_owned_range_indices();
+  std::vector<unsigned int> row_indices;
+  range_index_set.fill_index_vector(row_indices);
+
+  for (int i = 0; i < C_d.n_local_rows(); ++i)
+    for (int j = C_row_ptr_host[i]; j < C_row_ptr_host[i + 1]; ++j)
+      BOOST_CHECK_CLOSE(C_val_host[j],
+                        C_h.el(row_indices[i], C_column_index_host[j]), 1e-10);
 }
+
+template <int dim>
+class MaterialProperty : public dealii::Function<dim>
+{
+public:
+  double value(dealii::Point<dim> const &p,
+               unsigned int const component = 0) const override
+  {
+    return 1.0;
+  }
+};
+
+template <int dim>
+class Source : public dealii::Function<dim>
+{
+public:
+  double value(dealii::Point<dim> const &p,
+               unsigned int const component = 0) const override
+  {
+    return -2.0;
+  }
+};
 
 BOOST_AUTO_TEST_CASE(mmult2)
 {
+
+  int rank = dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD);
+  if (rank == 133)
+  {
+    int i = 0;
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    printf("PID %d on %s ready for attach\n", getpid(), hostname);
+    fflush(stdout);
+    while (0 == i)
+      sleep(5);
+  }
+
+  Laplace<2, dealii::TrilinosWrappers::MPI::Vector> laplace(MPI_COMM_WORLD, 2);
+  laplace.setup_system(boost::property_tree::ptree());
+  laplace.assemble_system(Source<2>(), MaterialProperty<2>());
+
   cusparseStatus_t cusparse_error_code;
   cusparseHandle_t cusparse_handle = nullptr;
   cusparse_error_code = cusparseCreate(&cusparse_handle);
@@ -400,10 +462,10 @@ BOOST_AUTO_TEST_CASE(mmult2)
       };
 
   // TODO fill matrices
-  dealii::TrilinosWrappers::SparseMatrix A_h;
-  dealii::TrilinosWrappers::SparseMatrix B_h;
+  dealii::TrilinosWrappers::SparseMatrix const &A_h = laplace._system_matrix;
+  dealii::TrilinosWrappers::SparseMatrix const &B_h = laplace._system_matrix;
 
-  testMatrixMatrixMultiplicationOnDevice(A_h, A_h,
+  testMatrixMatrixMultiplicationOnDevice(A_h, B_h,
                                          copy_sparse_matrix_to_device);
 
   cusparse_error_code = cusparseDestroy(cusparse_handle);
